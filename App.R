@@ -17,7 +17,6 @@ cache_file = "cached_gtfs_data.rds"
 
 ## Load cache if it exists
 if (file.exists(cache_file)) {
-  cat("Loading cached GTFS data...\n")
   cached_data = readRDS(cache_file)
   combined_data = cached_data$combined_data
   filtered_travel_times = cached_data$filtered_travel_times
@@ -27,24 +26,37 @@ if (file.exists(cache_file)) {
   ridership_df = cached_data$ridership_df
   ## Otherwise, run script
 } else {
-  cat("Processing GTFS data - this may take a while...\n")
   ## Import relevant data for stations, lines, ridership
-  stations = read_sf("https://ressources.data.sncf.com/api/explore/v2.1/catalog/datasets/gares-de-voyageurs/exports/geojson")
-  lines = read_sf("https://ressources.data.sncf.com/api/explore/v2.1/catalog/datasets/formes-des-lignes-du-rfn/exports/geojson")
-  network = read_sf("https://ressources.data.sncf.com/api/explore/v2.1/catalog/datasets/liste-des-gares/exports/geojson")
-  ridership_raw = jsonlite::fromJSON("https://data.sncf.com/api/explore/v2.1/catalog/datasets/frequentation-gares/exports/json", flatten = TRUE)
+  stations = read_sf(
+    "https://ressources.data.sncf.com/api/explore/v2.1/catalog/datasets/gares-de-voyageurs/exports/geojson"
+  )
+  lines = read_sf(
+    "https://ressources.data.sncf.com/api/explore/v2.1/catalog/datasets/formes-des-lignes-du-rfn/exports/geojson"
+  )
+  network = read_sf(
+    "https://ressources.data.sncf.com/api/explore/v2.1/catalog/datasets/liste-des-gares/exports/geojson"
+  )
+  ridership_raw = jsonlite::fromJSON(
+    "https://data.sncf.com/api/explore/v2.1/catalog/datasets/frequentation-gares/exports/json",
+    flatten = TRUE
+  )
+  ## Filter out freight rail stations
   passengerstations = network %>% filter(voyageurs == "O")
   
-  ### Create ridership dataframe, filter out unneeded columns
+  ## Create ridership dataframe, filter out unneeded columns
   ridership_df = ridership_raw
   ridership_df = ridership_df %>%
-    dplyr::select(code_uic_complet,
-                  dplyr::matches("^(total_voyageurs_[0-9]{4}|totalvoyageurs[0-9]{4})$"))
+    dplyr::select(
+      code_uic_complet,
+      dplyr::matches("^(total_voyageurs_[0-9]{4}|totalvoyageurs[0-9]{4})$")
+    )
   
   ## Rename any remaining columns that are not under uniform name
   ridership_df = ridership_df %>%
-    dplyr::rename_with(~ gsub("^totalvoyageurs", "total_voyageurs_", .x),
-                       dplyr::matches("^totalvoyageurs"))
+    dplyr::rename_with(
+      ~ gsub("^totalvoyageurs", "total_voyageurs_", .x),
+      dplyr::matches("^totalvoyageurs")
+    )
   
   ## Calculate average of all year values, return whole number result
   cols_to_convert = setdiff(names(ridership_df), "code_uic_complet")
@@ -110,10 +122,19 @@ if (file.exists(cache_file)) {
   }
   
   ## Process SNCF Intercités (Local), TER (Express), and TGV (High-Speed) GTFS data
-  intercity_data = process_gtfs("https://eu.ftp.opendatasoft.com/sncf/plandata/export-intercites-gtfs-last.zip", "Intercités")
-  ter_data = process_gtfs("https://eu.ftp.opendatasoft.com/sncf/plandata/export-ter-gtfs-last.zip", "TER")
-  tgv_data = process_gtfs("https://eu.ftp.opendatasoft.com/sncf/plandata/export_gtfs_voyages.zip", "TGV")
-
+  intercity_data = process_gtfs(
+    "https://eu.ftp.opendatasoft.com/sncf/plandata/export-intercites-gtfs-last.zip",
+    "Intercités"
+  )
+  ter_data = process_gtfs(
+    "https://eu.ftp.opendatasoft.com/sncf/plandata/export-ter-gtfs-last.zip",
+    "TER"
+  )
+  tgv_data = process_gtfs(
+    "https://eu.ftp.opendatasoft.com/sncf/plandata/export_gtfs_voyages.zip",
+    "TGV"
+  )
+  
   ## Merge all results
   combined_data = bind_rows(intercity_data, ter_data, tgv_data)
   
@@ -124,11 +145,13 @@ if (file.exists(cache_file)) {
     slice(1) %>%
     ungroup()
   
-  ## Filter to only include station data that falls inside French borders
+  ## Since the network contains duplicate stations, remove all but one
   network = network %>%
-    mutate(uic_code = ifelse(grepl("-", code_uic),
-                             str_extract(code_uic, "[0-9]+$"),
-                             code_uic)) %>%
+    mutate(uic_code = ifelse(
+      grepl("-", code_uic),
+      str_extract(code_uic, "[0-9]+$"),
+      code_uic
+    )) %>%
     separate_rows(uic_code, sep = ";") %>%
     distinct(uic_code, .keep_all = TRUE)
   
@@ -137,7 +160,7 @@ if (file.exists(cache_file)) {
     filter(stop_uic %in% network$uic_code,
            next_stop_uic %in% network$uic_code)
   
-  ## Convert filtered travel times into edge values, but only use unique pairings
+  ## Create new dataframe of pairings, but only use unique pairings
   edges = filtered_travel_times %>%
     select(stop_uic, next_stop_uic, transit_time) %>%
     distinct()
@@ -146,29 +169,37 @@ if (file.exists(cache_file)) {
   all_station_codes = unique(network$uic_code)
   
   ## Generate graph from edge data to create metrics, using station list to ensure no station is left out
-  g = graph_from_data_frame(edges, directed = FALSE, vertices = data.frame(name = all_station_codes))
+  g = graph_from_data_frame(edges,
+                            directed = FALSE,
+                            vertices = data.frame(name = all_station_codes))
   
-  ## Create degree, closeness, and betweenness metrics for data
+  ## Create degree and betweenness metrics for data
   degree_centrality = degree(g, mode = "all")
-  closeness_centrality = closeness(g, mode = "all", weights = 1/E(g)$transit_time)
-  betweenness_centrality = betweenness(g, directed = FALSE, weights = 1/E(g)$transit_time)
+  betweenness_centrality = betweenness(g,
+                                       directed = FALSE,
+                                       weights = 1 / E(g)$transit_time)
   
   ## Create data frame to store statistics
   centrality_stats = data.frame(
     stop_uic = V(g)$name,
     degree = degree_centrality,
-    closeness = closeness_centrality,
     betweenness = betweenness_centrality
   )
-
+  
   ## Fix rail line color/label values based on whether they are part of passenger or freight network
   lines = lines %>%
-    mutate(color = ifelse(code_ligne %in% passengerstations$code_ligne,
-                          "darkblue",
-                          "darkred"),
-           class = ifelse(code_ligne %in% passengerstations$code_ligne,
-                          "Passenger Rail",
-                          "Freight Rail"))
+    mutate(
+      color = ifelse(
+        code_ligne %in% passengerstations$code_ligne,
+        "darkblue",
+        "darkred"
+      ),
+      class = ifelse(
+        code_ligne %in% passengerstations$code_ligne,
+        "Passenger Rail",
+        "Freight Rail"
+      )
+    )
   
   ## Create and store list of cached data
   cached_data = list(
@@ -198,7 +229,13 @@ calculate_shortest_path = function(origin, destination) {
   ## Check to make sure it is in the network
   if (origin %in% V(g)$name && destination %in% V(g)$name) {
     ## Use network to determine shortest path between points, using transit time as weight
-    shortest_path = shortest_paths(g, from = origin, to = destination, weights = E(g)$transit_time, output = "vpath")
+    shortest_path = shortest_paths(
+      g,
+      from = origin,
+      to = destination,
+      weights = E(g)$transit_time,
+      output = "vpath"
+    )
     ## Create a string with all associated UICs
     path_uics = V(g)$name[unlist(shortest_path$vpath)]
     path_segments = c()
@@ -215,7 +252,10 @@ calculate_shortest_path = function(origin, destination) {
         slice(1)
       ## If path is possible, generate string from each stop on the way with name + train type, add transit time to accumulator
       if (nrow(segment) > 0) {
-        path_segment = paste0(segment$origin_stop_name, " (", segment$train_type, ")")
+        path_segment = paste0(segment$origin_stop_name,
+                              " (",
+                              segment$train_type,
+                              ")")
         path_segments = c(path_segments, path_segment)
         total_time = total_time + segment$transit_time
         ## Otherwise, tell user
@@ -262,47 +302,85 @@ filtered_travel_times = filtered_travel_times %>%
          next_stop_uic = as.character(next_stop_uic))
 
 ## Create bounding box with dimensions of France
-france_bbox = st_bbox(c(xmin = -5.0, ymin = 41.0, xmax = 10.0, ymax = 51.0), crs = st_crs(4326))
+france_bbox = st_bbox(c(
+  xmin = -5.0,
+  ymin = 41.0,
+  xmax = 10.0,
+  ymax = 51.0
+), crs = st_crs(4326))
 
 ## Exclude all stations that are outside of this bounding box
 stations_in_france = cached_data$network %>%
-  mutate(uic_code = as.character(uic_code),
-         coords = st_coordinates(geometry),
-         longitude = coords[, 1],
-         latitude = coords[, 2]) %>%
-  filter(longitude >= -5.0, longitude <= 10.0,
-         latitude >= 41.0, latitude <= 51.0) %>%
-  st_as_sf(coords = c("longitude", "latitude"), crs = 4326, agr = "constant") %>%
+  mutate(
+    uic_code = as.character(uic_code),
+    coords = st_coordinates(geometry),
+    longitude = coords[, 1],
+    latitude = coords[, 2]
+  ) %>%
+  filter(longitude >= -5.0,
+         longitude <= 10.0,
+         latitude >= 41.0,
+         latitude <= 51.0) %>%
+  st_as_sf(
+    coords = c("longitude", "latitude"),
+    crs = 4326,
+    agr = "constant"
+  ) %>%
   ## Add centrality statistics to these stations for use in map
   left_join(centrality_stats, by = c("uic_code" = "stop_uic")) %>%
-  left_join(ridership_df %>% dplyr::select(code_uic_complet, avg_ridership), 
-            by = c("uic_code" = "code_uic_complet"))
+  left_join(
+    ridership_df %>% dplyr::select(code_uic_complet, avg_ridership),
+    by = c("uic_code" = "code_uic_complet")
+  )
 
 ## Generate labels for stations
 station_labels = paste(
-  "<strong>Station Name:</strong>", stations_in_france$libelle,
-  "<br><strong>Degree Centrality (non-stop connections to other stations):</strong>", stations_in_france$degree,
-  "<br><strong>Closeness Centrality (proximity to all other stations in network):</strong>", round(stations_in_france$closeness, 4),
-  "<br><strong>Betweenness Centrality (paths in network that use this station):</strong>", format(round(stations_in_france$betweenness, 0), big.mark=",", scientific = FALSE),
-  "<br><strong>Average Annual Ridership (2015-2023):</strong>", format(stations_in_france$avg_ridership, big.mark=",", scientific=FALSE)
+  "<strong>Station Name:</strong>",
+  stations_in_france$libelle,
+  "<br><strong>Degree Centrality (non-stop connections to other stations):</strong>",
+  stations_in_france$degree,
+  "<br><strong>Betweenness Centrality (paths in network that use this station):</strong>",
+  format(
+    round(stations_in_france$betweenness, 0),
+    big.mark = ",",
+    scientific = FALSE
+  ),
+  "<br><strong>Average Annual Ridership (2015-2023):</strong>",
+  format(
+    stations_in_france$avg_ridership,
+    big.mark = ",",
+    scientific = FALSE
+  )
 )
 
 ## Create UI for app
 ui = fluidPage(
   ## Set size dynamically according to device
-  tags$head(tags$meta(name = "viewport", content = "width=device-width, initial-scale=1")),
+  tags$head(
+    tags$meta(name = "viewport", content = "width=device-width, initial-scale=1")
+  ),
   
   ## Set title, selector values (selector is empty with prompt for user to search)
-  titlePanel("SNCF Shortest Path Finder: Find the Shortest Possible Travel Time Between Two Stations in the French Rail Network"),
+  titlePanel(
+    "SNCF Shortest Path Finder: Find the Shortest Possible Travel Time Between Two Stations in the French Rail Network"
+  ),
   sidebarLayout(
     sidebarPanel(
-      selectizeInput("origin", "Select Origin Station:",
-                     choices = NULL, selected = NULL,
-                     options = list(placeholder = 'Start typing to search...', maxOptions = 4000)),
+      selectizeInput(
+        "origin",
+        "Select Origin Station:",
+        choices = NULL,
+        selected = NULL,
+        options = list(placeholder = 'Start typing to search...', maxOptions = 4000)
+      ),
       
-      selectizeInput("destination", "Select Destination Station:",
-                     choices = NULL, selected = NULL,
-                     options = list(placeholder = 'Start typing to search...', maxOptions = 4000)),
+      selectizeInput(
+        "destination",
+        "Select Destination Station:",
+        choices = NULL,
+        selected = NULL,
+        options = list(placeholder = 'Start typing to search...', maxOptions = 4000)
+      ),
       
       actionButton("findPath", "Find Shortest Path"),
       width = 3
@@ -314,21 +392,29 @@ ui = fluidPage(
       width = 9
     )
   ),
-  tags$style(type = "text/css", "#pathOutput {white-space: pre-wrap; word-wrap: break-word; overflow-x: hidden; overflow-y: auto; height: 150px; border: 1px solid #ccc; padding: 10px;}")
+  tags$style(
+    type = "text/css",
+    "#pathOutput {white-space: pre-wrap; word-wrap: break-word; overflow-x: hidden; overflow-y: auto; height: 150px; border: 1px solid #ccc; padding: 10px;}"
+  )
 )
 
 ## Define server for Shiny
 server = function(input, output, session) {
-  
   ## Generate a leaflet map with predefined station, marker, rail line values
   output$map = renderLeaflet({
     leaflet(stations_in_france) %>%
       addProviderTiles(providers$CartoDB.Positron) %>%
-      addMarkers(icon = station_icon,
-                 lng = ~st_coordinates(geometry)[,1],
-                 lat = ~st_coordinates(geometry)[,2],
-                 popup = station_labels) %>%
-      addPolylines(data = cached_data$lines, color = ~color, label = ~class)
+      addMarkers(
+        icon = station_icon,
+        lng = ~ st_coordinates(geometry)[, 1],
+        lat = ~ st_coordinates(geometry)[, 2],
+        popup = station_labels
+      ) %>%
+      addPolylines(
+        data = cached_data$lines,
+        color = ~ color,
+        label = ~ class
+      )
   })
   
   ## Populate available origins from filtered travel times list, sort alphabetically
@@ -338,12 +424,19 @@ server = function(input, output, session) {
       pull(origin_stop_name) %>%
       sort()
     
-    if (!is.null(input$origin) && input$origin %in% available_origins) {
+    if (!is.null(input$origin) &&
+        input$origin %in% available_origins) {
       return()
     }
     
     ## Ensure that refreshing the origin list at start does not populate the selector
-    updateSelectizeInput(session, "origin", choices = available_origins, selected = character(0), server = TRUE)
+    updateSelectizeInput(
+      session,
+      "origin",
+      choices = available_origins,
+      selected = character(0),
+      server = TRUE
+    )
   })
   
   ## Sort destination selector list
@@ -362,12 +455,19 @@ server = function(input, output, session) {
         pull(destination_stop_name) %>%
         sort()
       
-      if (!is.null(input$destination) && input$destination %in% reachable_stop_names) {
+      if (!is.null(input$destination) &&
+          input$destination %in% reachable_stop_names) {
         return()
       }
       
-      ## Ensure that refreshing the destination list at start does not populate the selector 
-      updateSelectizeInput(session, "destination", choices = reachable_stop_names, selected = character(0), server = TRUE)
+      ## Ensure that refreshing the destination list at start does not populate the selector
+      updateSelectizeInput(
+        session,
+        "destination",
+        choices = reachable_stop_names,
+        selected = character(0),
+        server = TRUE
+      )
     }
   })
   
@@ -393,7 +493,9 @@ server = function(input, output, session) {
     })
     
     ## Return path text when necessary
-    output$pathOutput = renderText({ path_result })
+    output$pathOutput = renderText({
+      path_result
+    })
     
   })
 }
